@@ -1,0 +1,195 @@
+# Install required libraries (run this in Colab if needed)
+!pip install pandas numpy scipy statsmodels semopy graphviz matplotlib seaborn nltk wordcloud imbalanced-learn factor_analyzer
+
+import pandas as pd
+import numpy as np
+from scipy import stats
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+from semopy import Model, Optimizer, semplot
+import graphviz
+import matplotlib.pyplot as plt
+import seaborn as sns
+import nltk
+from nltk.corpus import stopwords
+from wordcloud import WordCloud
+from sklearn.decomposition import PCA  # For dimensionality reduction if needed for SEM
+from factor_analyzer import FactorAnalyzer, calculate_kmo, calculate_bartlett_sphericity
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Download NLTK data
+nltk.download('stopwords')
+
+# Load the CSV data
+# In Colab, upload the CSV file or use a URL if hosted
+# For local run, replace with pd.read_csv('your_file.csv')
+from google.colab import files
+uploaded = files.upload()
+data = pd.read_csv(next(iter(uploaded)))
+
+# Preview the data
+print(data.head())
+print(data.shape)
+
+# Data Cleaning
+# Rename columns if needed for clarity (based on document)
+data = data.rename(columns={'cyber_budget_pct': 'cyber_budget_pct', 'cloud_providers': 'cloud_providers', 'primary_motivation': 'primary_motivation', 'primary_obstacle': 'primary_obstacle'})
+
+# Handle missing values (drop or impute)
+data = data.dropna()  # Simple drop for demonstration; use imputation if needed
+
+# Section A: Descriptive Statistics for Demographics
+demographics = data[['institution_type', 'num_employees', 'years_using_cloud', 'cloud_deployment_type', 'has_cyber_unit', 'role', 'experience_years', 'education', 'certifications', 'region']]
+print(demographics.describe(include='all'))
+
+# Visualize demographics
+plt.figure(figsize=(10, 6))
+sns.countplot(y='institution_type', data=demographics)
+plt.title('Distribution of Institution Types')
+plt.savefig('figures/demographics_institution_type.png')
+plt.show()
+
+# Factor Analysis Function
+def perform_factor_analysis(section_data, section_name, n_factors=3):
+    """
+    Performs Exploratory Factor Analysis (EFA) on section data.
+    Returns factor loadings, communalities, and eigenvalues.
+    """
+    # Check adequacy
+    kmo_per_variable, kmo_total = calculate_kmo(section_data)
+    logging.info(f"{section_name} KMO Test: {kmo_total}")
+
+    bartlett_chi2, bartlett_p = calculate_bartlett_sphericity(section_data)
+    logging.info(f"{section_name} Bartlett's Test: chi2={bartlett_chi2}, p-value={bartlett_p}")
+
+    # If KMO > 0.6 and Bartlett p < 0.05, proceed
+    if kmo_total > 0.6 and bartlett_p < 0.05:
+        fa = FactorAnalyzer(n_factors=n_factors, rotation='varimax')
+        fa.fit(section_data)
+
+        # Loadings
+        loadings = pd.DataFrame(fa.loadings_, index=section_data.columns, columns=[f'Factor {i+1}' for i in range(n_factors)])
+        logging.info(f"{section_name} Factor Loadings:\n {loadings}")
+
+        # Communalities
+        communalities = pd.DataFrame(fa.get_communalities(), index=section_data.columns, columns=['Communalities'])
+        logging.info(f"{section_name} Communalities:\n {communalities}")
+
+        # Eigenvalues
+        eigenvalues = fa.get_eigenvalues()[0]
+        logging.info(f"{section_name} Eigenvalues: {eigenvalues}")
+
+        # Scree Plot
+        plt.figure(figsize=(8, 4))
+        plt.plot(range(1, len(eigenvalues) + 1), eigenvalues, 'o-')
+        plt.title(f'{section_name} Scree Plot')
+        plt.xlabel('Factors')
+        plt.ylabel('Eigenvalue')
+        plt.grid(True)
+        plt.savefig(f'figures/{section_name.lower().replace(" ", "_")}_scree_plot.png')
+        plt.show()
+
+        return loadings, communalities, eigenvalues
+    else:
+        logging.warning(f"{section_name} Data not suitable for factor analysis.")
+        return None, None, None
+
+# Perform Factor Analysis for Each Section
+# Section B: Cloud Infrastructure Vulnerabilities (B1 to B15)
+section_b = data.loc[:, 'B1':'B15']
+loadings_b, communalities_b, eigenvalues_b = perform_factor_analysis(section_b, 'Cloud Infrastructure Vulnerabilities')
+
+# Section C: AI Techniques and Tools (C1 to C20)
+section_c = data.loc[:, 'C1':'C20']
+loadings_c, communalities_c, eigenvalues_c = perform_factor_analysis(section_c, 'AI Techniques and Tools', n_factors=4)  # Adjust n_factors if needed
+
+# Section D: Regulatory and Ethical Context (D1 to D15)
+section_d = data.loc[:, 'D1':'D15']
+loadings_d, communalities_d, eigenvalues_d = perform_factor_analysis(section_d, 'Regulatory and Ethical Context')
+
+# Section E: Enhanced Cloud Security (E1 to E20) - Dependent Variable
+section_e = data.loc[:, 'E1':'E20']
+loadings_e, communalities_e, eigenvalues_e = perform_factor_analysis(section_e, 'Enhanced Cloud Security', n_factors=4)
+
+# Create aggregate factor scores (e.g., mean of high-loading items or factor scores from FA)
+# For simplicity, use mean of all items per section; for accuracy, use fa.transform(section_data) to get factor scores
+data['cloud_vuln_score'] = section_b.mean(axis=1)  # Or use fa.transform for latent scores
+data['ai_tech_score'] = section_c.mean(axis=1)
+data['reg_ethical_score'] = section_d.mean(axis=1)
+data['enhanced_security_score'] = section_e.mean(axis=1)
+
+# Correlation Analysis
+correlation_matrix = data[['cloud_vuln_score', 'ai_tech_score', 'reg_ethical_score', 'enhanced_security_score']].corr()
+print("Correlation Matrix:\n", correlation_matrix)
+
+# Visualize Correlation Matrix
+plt.figure(figsize=(8, 6))
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm')
+plt.title('Correlation Matrix of Aggregate Scores')
+plt.savefig('figures/correlation_matrix.png')
+plt.show()
+
+# Multiple Regression: Predict Enhanced Cloud Security from Independent Vars
+X = data[['cloud_vuln_score', 'ai_tech_score', 'reg_ethical_score']]
+X = sm.add_constant(X)
+y = data['enhanced_security_score']
+model = sm.OLS(y, X).fit()
+print(model.summary())
+
+# ANOVA for Dependent Variable by Institution Type
+anova_model = ols('enhanced_security_score ~ C(institution_type)', data=data).fit()
+anova_table = sm.stats.anova_lm(anova_model, typ=2)
+print("ANOVA for Enhanced Security by Institution Type:\n", anova_table)
+
+# SEM Analysis (Using semopy)
+# Define SEM model with latent variables (measurement model + structural model)
+sem_model_desc = '''
+# Measurement Model (Latent Variables)
+cloud_vuln_score =~ B1 + B2 + B3 + B4 + B5 + B6 + B7 + B8 + B9 + B10 + B11 + B12 + B13 + B14 + B15
+ai_tech_score =~ C1 + C2 + C3 + C4 + C5 + C6 + C7 + C8 + C9 + C10 + C11 + C12 + C13 + C14 + C15 + C16 + C17 + C18 + C19 + C20
+reg_ethical_score =~ D1 + D2 + D3 + D4 + D5 + D6 + D7 + D8 + D9 + D10 + D11 + D12 + D13 + D14 + D15
+enhanced_security_score =~ E1 + E2 + E3 + E4 + E5 + E6 + E7 + E8 + E9 + E10 + E11 + E12 + E13 + E14 + E15 + E16 + E17 + E18 + E19 + E20
+
+# Structural Model
+enhanced_security_score ~ cloud_vuln_score + ai_tech_score + reg_ethical_score
+'''
+
+sem_model = Model(sem_model_desc)
+sem_model.fit(data)
+print(sem_model.inspect())
+
+# Generate Path Diagram for SEM
+opt = Optimizer(sem_model)
+opt.optimize()
+semplot(sem_model, 'figures/sem_path_diagram.png')
+print("SEM path diagram saved to 'figures/sem_path_diagram.png'")
+
+# Qualitative Analysis for Open-Ended Questions (Thematic with Word Cloud)
+open_columns = ['open_B1', 'open_C1', 'open_D1', 'open_E1']
+all_text = ' '.join(data[open_columns].fillna('').values.flatten())
+
+# Remove stopwords
+stop_words = set(stopwords.words('english'))
+wordcloud = WordCloud(stopwords=stop_words, background_color='white').generate(all_text)
+
+plt.figure(figsize=(10, 6))
+plt.imshow(wordcloud, interpolation='bilinear')
+plt.axis('off')
+plt.title('Word Cloud of Open-Ended Responses')
+plt.savefig('figures/open_ended_wordcloud.png')
+plt.show()
+
+# Simple Thematic Analysis (Frequency of Common Words)
+from collections import Counter
+words = all_text.lower().split()
+common_words = Counter(words).most_common(50)
+print("Common Themes from Open-Ended Responses:\n", common_words)
+
+# Save all analysis results to CSV for thesis appendix
+data.to_csv('analyzed_responses.csv', index=False)
+print("Analyzed data saved to 'analyzed_responses.csv'")
+
+print("Analysis complete. Check 'figures/' for visualizations and console/log for details.")
